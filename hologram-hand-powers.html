@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sling Ring · Doctor Strange</title>
+<style>
+  :root { --amber:#ffa032; --ink:#070402; }
+  * { box-sizing:border-box; margin:0; }
+  html, body { height:100%; background:var(--ink); color:var(--amber); font-family:system-ui, "Noto Sans Thai", sans-serif; overflow:hidden; }
+  video, canvas { position:fixed; inset:0; width:100%; height:100%; }
+  video { object-fit:cover; transform:scaleX(-1); filter:saturate(.5) brightness(.5) sepia(.4); }
+  #fx { pointer-events:none; }
+  #hud { position:fixed; left:0; right:0; top:0; padding:calc(env(safe-area-inset-top,0px) + 12px) 16px 0; display:flex; justify-content:space-between; align-items:flex-start; pointer-events:none; }
+  .chip { padding:6px 12px; border:1px solid rgba(255,160,50,.45); border-radius:999px; font-size:13px; background:rgba(7,4,2,.55); font-variant-numeric:tabular-nums; }
+  #status { position:fixed; left:0; right:0; bottom:calc(env(safe-area-inset-bottom,0px) + 18px); text-align:center; font-size:16px; padding:0 16px; text-shadow:0 0 10px #000; }
+  #start { position:fixed; inset:0; display:flex; flex-direction:column; gap:16px; align-items:center; justify-content:center; background:var(--ink); z-index:5; text-align:center; padding:24px; }
+  #start h1 { font-size:28px; font-weight:600; }
+  #start p { max-width:30ch; line-height:1.6; opacity:.8; }
+  button { font:inherit; font-size:18px; color:var(--ink); background:var(--amber); border:0; padding:14px 32px; border-radius:12px; }
+  button:focus-visible { outline:3px solid #fff; outline-offset:3px; }
+</style>
+</head>
+<body>
+<video id="v" playsinline muted></video>
+<canvas id="fx"></canvas>
+<div id="hud">
+  <div class="chip">Sling Ring</div>
+  <div class="chip" id="fps">-- fps</div>
+</div>
+<div id="status">กำมือเพื่อเปิดวงเวท</div>
+<div id="start">
+  <h1>Sling Ring</h1>
+  <p>กำมือเพื่อเปิดวงเวทแบบ Doctor Strange แบมือเพื่อปิด</p>
+  <button id="go">เปิดกล้อง</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+<script>
+const video = document.getElementById('v');
+const cv = document.getElementById('fx');
+const ctx = cv.getContext('2d');
+const statusEl = document.getElementById('status');
+const fpsEl = document.getElementById('fps');
+let W = 0, H = 0;
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+addEventListener('resize', resize); resize();
+
+const C = '255,150,40', HOT = '255,225,160';
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const ease = o => 1 - Math.pow(1 - o, 3);
+
+function toScreen(p) {
+  const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
+  const s = Math.max(W / vw, H / vh);
+  return { x: (1 - p.x) * vw * s - (vw * s - W) / 2, y: p.y * vh * s - (vh * s - H) / 2 };
+}
+
+function analyze(lm) {
+  const tips = [8, 12, 16, 20], pips = [6, 10, 14, 18];
+  const count = tips.filter((tip, i) => dist(lm[tip], lm[0]) > dist(lm[pips[i]], lm[0]) * 1.12).length;
+  const ids = [0, 5, 9, 13, 17];
+  const c = toScreen({ x: ids.reduce((s, i) => s + lm[i].x, 0) / 5, y: ids.reduce((s, i) => s + lm[i].y, 0) / 5 });
+  return { fist: count === 0, c, size: dist(toScreen(lm[0]), toScreen(lm[9])) };
+}
+
+// one slot per hand; detection writes targets, render loop smooths them at display rate
+const slots = [0, 1].map(() => ({ x: 0, y: 0, size: 0, tx: 0, ty: 0, tsize: 0, open: 0, seen: -1e9, lastFist: -1e9 }));
+let detectCount = 0;
+
+const handsModel = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
+handsModel.setOptions({ maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
+handsModel.onResults(r => {
+  detectCount++;
+  const now = performance.now();
+  (r.multiHandLandmarks || []).slice(0, 2).forEach((lm, i) => {
+    const h = analyze(lm), s = slots[i];
+    if (now - s.seen > 400) { s.x = h.c.x; s.y = h.c.y; s.size = h.size; }
+    s.tx = h.c.x; s.ty = h.c.y; s.tsize = h.size; s.seen = now;
+    if (h.fist) s.lastFist = now;
+  });
+});
+
+let sparks = [];
+function spawnSparks(s, R, o) {
+  const n = Math.round(5 * o);
+  for (let i = 0; i < n && sparks.length < 500; i++) {
+    const a = Math.random() * Math.PI * 2, r = R * (.85 + Math.random() * .15);
+    const sp = 2 + Math.random() * 5, out = 1 + Math.random() * 3;
+    const x = s.x + Math.cos(a) * r, y = s.y + Math.sin(a) * r;
+    sparks.push({ x, y, px: x, py: y,
+      vx: -Math.sin(a) * sp + Math.cos(a) * out, vy: Math.cos(a) * sp + Math.sin(a) * out - 1,
+      life: 1, decay: .015 + Math.random() * .02 });
+  }
+}
+
+function glowStroke(wide, thin) {
+  ctx.strokeStyle = `rgba(${C},.2)`; ctx.lineWidth = wide; ctx.stroke();
+  ctx.strokeStyle = `rgba(${HOT},.95)`; ctx.lineWidth = thin; ctx.stroke();
+}
+function circle(r) { ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); }
+function polygon(n, r, step) {
+  ctx.beginPath();
+  for (let i = 0; i <= n; i++) {
+    const a = (i * step / n) * Math.PI * 2 - Math.PI / 2;
+    i ? ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r) : ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+}
+
+function drawMandala(s, t) {
+  const o = ease(s.open);
+  const R = s.size * 2.8 * o;
+  if (R < 2) return;
+  ctx.save();
+  ctx.translate(s.x, s.y);
+  ctx.globalAlpha = Math.min(1, o * 1.4);
+
+  const g = ctx.createRadialGradient(0, 0, 0, 0, 0, R * 1.25);
+  g.addColorStop(0, `rgba(${C},.35)`); g.addColorStop(.7, `rgba(${C},.12)`); g.addColorStop(1, `rgba(${C},0)`);
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, R * 1.25, 0, 7); ctx.fill();
+
+  // outer ring + dashed ring
+  circle(R); glowStroke(8, 2.2);
+  ctx.save(); ctx.setLineDash([R * .07, R * .035]); ctx.lineDashOffset = -t * R * .25;
+  circle(R * .93); glowStroke(4, 1.3); ctx.restore();
+
+  // tick ring
+  ctx.save(); ctx.rotate(-t * .5);
+  ctx.beginPath();
+  for (let i = 0; i < 36; i++) {
+    const a = i / 36 * Math.PI * 2, r0 = R * .8, r1 = R * (i % 3 ? .85 : .88);
+    ctx.moveTo(Math.cos(a) * r0, Math.sin(a) * r0); ctx.lineTo(Math.cos(a) * r1, Math.sin(a) * r1);
+  }
+  glowStroke(3, 1); ctx.restore();
+  circle(R * .78); glowStroke(3, 1.2);
+
+  // rune ring
+  ctx.save(); ctx.rotate(t * .35);
+  for (let i = 0; i < 12; i++) {
+    ctx.save(); ctx.rotate(i / 12 * Math.PI * 2);
+    ctx.beginPath();
+    ctx.moveTo(R * .64, 0); ctx.lineTo(R * .74, 0);
+    ctx.moveTo(R * .69, -R * .035); ctx.lineTo(R * .72, 0); ctx.lineTo(R * .69, R * .035); ctx.lineTo(R * .66, 0); ctx.closePath();
+    glowStroke(3, 1.2); ctx.restore();
+  }
+  ctx.restore();
+  circle(R * .62); glowStroke(3, 1.2);
+
+  // counter-rotating squares
+  ctx.save(); ctx.rotate(t * .6); polygon(4, R * .55, 1); glowStroke(3, 1.4); ctx.restore();
+  ctx.save(); ctx.rotate(-t * .6 + Math.PI / 4); polygon(4, R * .55, 1); glowStroke(3, 1.4); ctx.restore();
+
+  // inner star {8/3}
+  circle(R * .4); glowStroke(3, 1.2);
+  ctx.save(); ctx.rotate(t * .9); polygon(8, R * .4, 3); glowStroke(3, 1.4); ctx.restore();
+
+  const core = ctx.createRadialGradient(0, 0, 0, 0, 0, R * .18);
+  core.addColorStop(0, `rgba(${HOT},.95)`); core.addColorStop(1, `rgba(${C},0)`);
+  ctx.fillStyle = core; ctx.beginPath(); ctx.arc(0, 0, R * .18, 0, 7); ctx.fill();
+  ctx.restore();
+}
+
+let last = performance.now(), frames = 0, fpsTimer = last, detTimer = last;
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, .1); last = now;
+  const t = now / 1000;
+  frames++;
+  if (now - fpsTimer >= 500) {
+    const d = (now - detTimer) / 1000;
+    fpsEl.textContent = `${Math.round(frames / ((now - fpsTimer) / 1000))} fps · ตรวจจับ ${Math.round(detectCount / d)}`;
+    frames = 0; fpsTimer = now; detectCount = 0; detTimer = now;
+  }
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'lighter';
+  const kPos = 1 - Math.exp(-dt * 28), kSize = 1 - Math.exp(-dt * 18);
+  let anyOpen = false, anyHand = false;
+
+  for (const s of slots) {
+    const visible = now - s.seen < 250;
+    const fist = visible && now - s.lastFist < 150;
+    if (visible) anyHand = true;
+    if (fist) anyOpen = true;
+    s.x += (s.tx - s.x) * kPos; s.y += (s.ty - s.y) * kPos; s.size += (s.tsize - s.size) * kSize;
+    s.open += ((fist ? 1 : 0) - s.open) * (1 - Math.exp(-dt * (fist ? 12 : 20)));
+    if (s.open < .005) s.open = 0;
+    if (s.open > 0) { drawMandala(s, t); spawnSparks(s, s.size * 2.8 * ease(s.open), s.open); }
+  }
+
+  // sparks
+  const kept = [];
+  ctx.lineCap = 'round';
+  for (const p of sparks) {
+    p.px = p.x; p.py = p.y;
+    p.x += p.vx; p.y += p.vy; p.vy += .1; p.vx *= .985; p.life -= p.decay;
+    if (p.life <= 0) continue;
+    ctx.strokeStyle = `rgba(255,${170 + (p.life * 70) | 0},70,${p.life})`;
+    ctx.lineWidth = 1 + p.life * 1.6;
+    ctx.beginPath(); ctx.moveTo(p.px, p.py); ctx.lineTo(p.x, p.y); ctx.stroke();
+    kept.push(p);
+  }
+  sparks = kept;
+  ctx.globalCompositeOperation = 'source-over';
+
+  statusEl.textContent = anyOpen ? 'วงเวทเปิดแล้ว' : anyHand ? 'กำมือเพื่อเปิดวงเวท' : 'ยื่นมือเข้ามาในกล้อง';
+  requestAnimationFrame(frame);
+}
+
+document.getElementById('go').onclick = async () => {
+  const btn = document.getElementById('go');
+  btn.disabled = true; btn.textContent = 'กำลังโหลด...';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 540 }, frameRate: { ideal: 60 } }, audio: false
+    });
+    video.srcObject = stream; await video.play();
+    document.getElementById('start').remove();
+    requestAnimationFrame(frame);
+    let busy = false;
+    const loop = async () => {
+      if (!busy && video.readyState >= 2) {
+        busy = true;
+        try { await handsModel.send({ image: video }); } catch (e) { console.error(e); }
+        busy = false;
+      }
+      requestAnimationFrame(loop);
+    };
+    loop();
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'เปิดกล้อง';
+    alert('เปิดกล้องไม่ได้: ต้องอนุญาตกล้อง และเปิดผ่าน https หรือ localhost');
+  }
+};
+</script>
+</body>
+</html>
