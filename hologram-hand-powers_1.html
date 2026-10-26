@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Hologram Hand Powers</title>
+<style>
+  :root { --cyan:#5ef2ff; --ink:#02080d; --fire:#ff9a3c; --volt:#b9a6ff; --ward:#5ef2ff; }
+  * { box-sizing:border-box; margin:0; }
+  html, body { height:100%; background:var(--ink); color:var(--cyan); font-family:system-ui, "Noto Sans Thai", sans-serif; overflow:hidden; }
+  video, canvas { position:fixed; inset:0; width:100%; height:100%; }
+  video { object-fit:cover; transform:scaleX(-1); filter:saturate(.35) brightness(.55) hue-rotate(150deg); }
+  #fx { pointer-events:none; }
+  .scan { position:fixed; inset:0; pointer-events:none; background:repeating-linear-gradient(0deg, rgba(94,242,255,.06) 0 1px, transparent 1px 4px); mix-blend-mode:screen; }
+  #hud { position:fixed; left:0; right:0; top:0; padding:calc(env(safe-area-inset-top,0px) + 12px) 16px 0; display:flex; gap:8px; justify-content:center; }
+  .chip { padding:8px 14px; border:1px solid rgba(94,242,255,.35); border-radius:999px; font-size:14px; background:rgba(2,8,13,.55); backdrop-filter:blur(4px); opacity:.55; transition:.15s; }
+  .chip.on { opacity:1; border-color:currentColor; box-shadow:0 0 14px currentColor; }
+  #status { position:fixed; left:0; right:0; bottom:calc(env(safe-area-inset-bottom,0px) + 16px); text-align:center; font-size:15px; padding:0 16px; text-shadow:0 0 8px #000; }
+  #start { position:fixed; inset:0; display:flex; flex-direction:column; gap:16px; align-items:center; justify-content:center; background:var(--ink); z-index:5; text-align:center; padding:24px; }
+  #start h1 { font-size:28px; font-weight:600; }
+  #start p { max-width:30ch; line-height:1.6; opacity:.8; }
+  button { font:inherit; font-size:18px; color:var(--ink); background:var(--cyan); border:0; padding:14px 32px; border-radius:12px; }
+  button:focus-visible { outline:3px solid #fff; outline-offset:3px; }
+</style>
+</head>
+<body>
+<video id="v" playsinline muted></video>
+<canvas id="fx"></canvas>
+<div class="scan"></div>
+<div id="hud">
+  <div class="chip" id="c1" style="color:var(--fire)">1 นิ้ว · ไฟ</div>
+  <div class="chip" id="c2" style="color:var(--volt)">2 นิ้ว · สายฟ้า</div>
+  <div class="chip" id="c3" style="color:var(--ward)">3 นิ้ว · วงเวท</div>
+</div>
+<div id="status">ชูนิ้วเลือกพลัง แล้วกำมือเพื่อปล่อย</div>
+<div id="start">
+  <h1>Hologram Hand Powers</h1>
+  <p>ชู 1–3 นิ้วเพื่อเลือกพลัง แล้วกำมือเพื่อปล่อย แบมือเพื่อหยุด</p>
+  <button id="go">เปิดกล้อง</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+<script>
+const video = document.getElementById('v');
+const cv = document.getElementById('fx');
+const ctx = cv.getContext('2d');
+const status = document.getElementById('status');
+let W = 0, H = 0, dpr = 1;
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+addEventListener('resize', resize); resize();
+
+const POWERS = {
+  1: { name: 'ไฟ', color: '255,154,60' },
+  2: { name: 'สายฟ้า', color: '185,166,255' },
+  3: { name: 'วงเวท', color: '94,242,255' }
+};
+let selected = 1;
+let hands = [];          // processed hands each frame
+let particles = [];
+let t = 0;
+
+// map normalized landmark -> screen (mirrored, object-fit: cover)
+function toScreen(p) {
+  const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
+  const s = Math.max(W / vw, H / vh);
+  return {
+    x: (1 - p.x) * vw * s - (vw * s - W) / 2,
+    y: p.y * vh * s - (vh * s - H) / 2
+  };
+}
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+function analyze(lm) {
+  // finger extended if tip is farther from wrist than its middle joint
+  const tips = [8, 12, 16, 20], pips = [6, 10, 14, 18];
+  const ext = tips.map((tip, i) => dist(lm[tip], lm[0]) > dist(lm[pips[i]], lm[0]) * 1.12);
+  const count = ext.filter(Boolean).length;
+  const ids = [0, 5, 9, 13, 17];
+  const c = toScreen({
+    x: ids.reduce((s, i) => s + lm[i].x, 0) / 5,
+    y: ids.reduce((s, i) => s + lm[i].y, 0) / 5
+  });
+  const size = dist(toScreen(lm[0]), toScreen(lm[9]));
+  return { count, fist: count === 0, c, size };
+}
+
+const handsModel = new Hands({
+  locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`
+});
+handsModel.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
+handsModel.onResults(r => {
+  hands = (r.multiHandLandmarks || []).map(analyze);
+  const open = hands.find(h => !h.fist && h.count >= 1 && h.count <= 3);
+  if (open) selected = open.count;
+  ['c1', 'c2', 'c3'].forEach((id, i) => document.getElementById(id).classList.toggle('on', selected === i + 1));
+  if (!hands.length) status.textContent = 'ยื่นมือเข้ามาในกล้อง';
+  else if (hands.some(h => h.fist)) status.textContent = 'พลัง' + POWERS[selected].name + '!';
+  else status.textContent = 'เลือก: ' + POWERS[selected].name + ' · กำมือเพื่อปล่อย';
+});
+
+function emit(h) {
+  const col = POWERS[selected].color;
+  if (selected === 1) {
+    for (let i = 0; i < 6; i++) particles.push({
+      x: h.c.x + (Math.random() - .5) * h.size * .6, y: h.c.y - h.size * .2,
+      vx: (Math.random() - .5) * 1.6, vy: -2 - Math.random() * 3.5,
+      life: 1, decay: .018 + Math.random() * .02, r: h.size * (.12 + Math.random() * .14), col
+    });
+  }
+}
+
+function drawLightning(h) {
+  const col = POWERS[2].color;
+  const n = 5;
+  for (let k = 0; k < n; k++) {
+    const ang = Math.random() * Math.PI * 2;
+    const len = h.size * (1.4 + Math.random() * 1.6);
+    let x = h.c.x, y = h.c.y;
+    ctx.beginPath(); ctx.moveTo(x, y);
+    const steps = 9;
+    for (let i = 1; i <= steps; i++) {
+      const d = len * i / steps;
+      x = h.c.x + Math.cos(ang) * d + (Math.random() - .5) * h.size * .5;
+      y = h.c.y + Math.sin(ang) * d + (Math.random() - .5) * h.size * .5;
+      ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = `rgba(${col},${.5 + Math.random() * .5})`;
+    ctx.lineWidth = 1 + Math.random() * 2.5;
+    ctx.shadowColor = `rgb(${col})`; ctx.shadowBlur = 16;
+    ctx.stroke();
+  }
+  ctx.shadowBlur = 0;
+  const g = ctx.createRadialGradient(h.c.x, h.c.y, 0, h.c.x, h.c.y, h.size);
+  g.addColorStop(0, `rgba(${col},.8)`); g.addColorStop(1, `rgba(${col},0)`);
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(h.c.x, h.c.y, h.size, 0, 7); ctx.fill();
+}
+
+function drawWard(h) {
+  const col = POWERS[3].color;
+  ctx.save(); ctx.translate(h.c.x, h.c.y);
+  ctx.shadowColor = `rgb(${col})`; ctx.shadowBlur = 14;
+  const R = h.size * 2.2;
+  [[R, 1, 1.2], [R * .78, -1, 1.6], [R * .52, 1, 2.2]].forEach(([r, dir, w], idx) => {
+    ctx.save(); ctx.rotate(t * .02 * dir * (idx + 1) * .6);
+    ctx.strokeStyle = `rgba(${col},.85)`; ctx.lineWidth = w;
+    ctx.setLineDash(idx === 1 ? [6, 10] : idx === 2 ? [] : [30, 8]);
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  });
+  // hexagram
+  ctx.rotate(-t * .015); ctx.setLineDash([]); ctx.lineWidth = 1.5;
+  const r = R * .72;
+  for (let k = 0; k < 2; k++) {
+    ctx.beginPath();
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * Math.PI * 2 + k * Math.PI / 3 - Math.PI / 2;
+      i ? ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r) : ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+    }
+    ctx.closePath(); ctx.stroke();
+  }
+  ctx.restore(); ctx.shadowBlur = 0;
+  const g = ctx.createRadialGradient(h.c.x, h.c.y, 0, h.c.x, h.c.y, R);
+  g.addColorStop(0, `rgba(${col},.25)`); g.addColorStop(1, `rgba(${col},0)`);
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(h.c.x, h.c.y, R, 0, 7); ctx.fill();
+}
+
+function frame() {
+  t++;
+  ctx.clearRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'lighter';
+  for (const h of hands) {
+    if (!h.fist) continue;
+    if (selected === 1) emit(h);
+    else if (selected === 2) drawLightning(h);
+    else drawWard(h);
+  }
+  particles = particles.filter(p => p.life > 0);
+  for (const p of particles) {
+    p.x += p.vx; p.y += p.vy; p.vx += (Math.random() - .5) * .3; p.life -= p.decay;
+    const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r);
+    g.addColorStop(0, `rgba(255,240,200,${p.life})`);
+    g.addColorStop(.4, `rgba(${p.col},${p.life * .7})`);
+    g.addColorStop(1, `rgba(${p.col},0)`);
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  requestAnimationFrame(frame);
+}
+
+document.getElementById('go').onclick = async () => {
+  const btn = document.getElementById('go');
+  btn.disabled = true; btn.textContent = 'กำลังโหลด...';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false
+    });
+    video.srcObject = stream; await video.play();
+    document.getElementById('start').remove();
+    frame();
+    let busy = false;
+    const loop = async () => {
+      if (!busy && video.readyState >= 2) {
+        busy = true;
+        try { await handsModel.send({ image: video }); } catch (e) { console.error(e); }
+        busy = false;
+      }
+      requestAnimationFrame(loop);
+    };
+    loop();
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'เปิดกล้อง';
+    alert('เปิดกล้องไม่ได้: ต้องอนุญาตกล้อง และเปิดผ่าน https หรือ localhost');
+  }
+};
+</script>
+</body>
+</html>
